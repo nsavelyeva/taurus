@@ -221,6 +221,7 @@ class IncludeScenarioBlock(Request):
     def __init__(self, scenario_name, config):
         super(IncludeScenarioBlock, self).__init__(config)
         self.scenario_name = scenario_name
+        self.requests = None
 
     def __repr__(self):
         return "IncludeScenarioBlock(scenario_name=%r)" % self.scenario_name
