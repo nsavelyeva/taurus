@@ -14,6 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 import os
+import shutil
 import json
 from bzt import TaurusConfigError, ToolError
 from bzt.engine import HavingInstallableTools
@@ -42,8 +43,8 @@ class K6Executor(ScenarioExecutor, FileLister, WidgetProvider, HavingInstallable
         self.script = self.get_script_path()
         if not self.script:
             if not self.scenario.get('requests'):
-                raise TaurusConfigError("Either 'script' or 'scenario' should be present for Vegeta executor")
-            proto = "grpc" if "procedure" in self.scenario["requests"][0] else "http"
+                raise TaurusConfigError("Either 'script' or 'scenario' should be present for K6 executor")
+            proto = "grpc" if "procedure" in self.scenario["requests"][0] else "http"  # try-except?
             self.script = os.path.join(self.engine.artifacts_dir, f"k6_script_{proto}.js")
             with open(os.path.join(RESOURCES_DIR, "k6", "templates", f"{proto}.txt"), "r") as f:
                 content = f.read()
@@ -59,11 +60,43 @@ class K6Executor(ScenarioExecutor, FileLister, WidgetProvider, HavingInstallable
                         request_dict.update({"body": request.body})
                     i += 1
                     batch_requests.update({f"Request {i}": request_dict})
-                with open(self.script, "w") as f:
-                    content = content.replace("REQUESTS", json.dumps(batch_requests, indent=4, sort_keys=True))
-                    f.write(content)
+                content = content.replace("REQUESTS", json.dumps(batch_requests, indent=4, sort_keys=True))
             else:  # i.e. grpc
-                pass
+                scenario = self.scenario["requests"][0]
+                print(scenario)
+                if set(["host", "port", "procedure"]) <= set(scenario.keys()):
+                    content = content.replace("HOST", scenario["host"]).replace("PORT", str(scenario["port"]))
+                    if scenario.get("protofile"):
+                        print(os.path.join(os.path.abspath(os.path.curdir), 'temp', 'k6', scenario["protofile"]))
+                        if os.path.isfile(os.path.join(os.path.abspath(os.path.curdir), 'temp', 'k6', scenario["protofile"])):
+                            shutil.copy(os.path.join(os.path.curdir, 'temp', 'k6', scenario["protofile"]),
+                                            # TODO: analyze where provided YAML was
+                                            os.path.join(self.engine.artifacts_dir, scenario["protofile"]))
+                        else:
+                            raise TaurusConfigError(f"Error accessing protofile. Does it exist?")
+                        if os.path.sep in scenario["protofile"]:
+                            folder = '"{}"'.format(scenario["protofile"][:scenario["protofile"].rfind(os.path.sep)])
+                            protofile = '"{}"'.format(scenario["protofile"][scenario["protofile"].rfind(os.path.sep):])
+
+                        else:
+                            folder, protofile = "", scenario["protofile"]
+                        content = content.replace("PROTOFILE", 'client.load([{}], "{}");'.format(folder, protofile))
+                    else:
+                        content = content.replace("PROTOFILE", "")
+                    if scenario.get("data"):
+                        data = json.dumps(scenario["data"])
+                        content = content.replace("REQUEST",
+                                                  'client.invoke("{}", {});'.format(scenario["procedure"], data))
+                    else:
+                        content = content.replace("REQUEST", 'client.invoke("{}")'.format(scenario["procedure"]))
+                    if scenario.get("plaintext"):
+                        content = content.replace("PLAINTEXT", str(scenario["plaintext"]).lower())
+                    else:
+                        content = content.replace("PLAINTEXT", "false")
+                else:
+                    raise TaurusConfigError("For gRPC request at least 'host', 'port', 'procedure' should be provided.")
+            with open(self.script, "w") as f:
+                f.write(content)
 
         self.stdout = open(self.engine.create_artifact("k6", ".out"), "w")
         self.stderr = open(self.engine.create_artifact("k6", ".err"), "w")
@@ -86,7 +119,7 @@ class K6Executor(ScenarioExecutor, FileLister, WidgetProvider, HavingInstallable
             with open(self.script, "a") as f:
                 f.write(options)
             cmdline += ['--env', 'arrival_rate=' + str(load.throughput)]
-            cmdline += ['--env', 'initialized_vus=' + str(load.concurrency or 1)]  # 1 vu by default
+            cmdline += ['--env', 'initialized_vus=' + str(load.concurrency or load.throughput // 10 or 1)]
             if load.hold:
                 cmdline += ['--env', 'duration=' + str(int(load.hold)) + "s"]
             # iterations ignored

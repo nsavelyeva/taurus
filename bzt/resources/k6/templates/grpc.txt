@@ -1,15 +1,14 @@
 import grpc from "k6/net/grpc";
 
 const client = new grpc.Client();
-client.load([PROTOFOLDER], "PROTOFILE");
+PROTOFILE
 
 export default () => {
   client.connect("HOST:PORT", {
      plaintext: PLAINTEXT
   });
 
-  const data = DATA;
-  const response = client.invoke("METHOD", data);
+  const response = REQUEST
 
   client.close();
 };
