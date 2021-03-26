@@ -1,0 +1,11 @@
+export let options = {
+    scenarios: {
+        options_scenario: {
+            executor: "constant-arrival-rate",
+            rate: __ENV.arrival_rate,
+            timeUnit: "1s",
+            duration: __ENV.duration,
+            preAllocatedVUs: __ENV.initialized_vus,
+        },
+    },
+};

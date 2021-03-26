@@ -13,12 +13,14 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 """
+import os
+import json
 from bzt import TaurusConfigError, ToolError
 from bzt.engine import HavingInstallableTools
 from bzt.modules import ScenarioExecutor, FileLister, SelfDiagnosable
 from bzt.modules.console import WidgetProvider, ExecutorWidget
 from bzt.modules.aggregator import ResultsReader, ConsolidatingAggregator
-from bzt.utils import RequiredTool, CALL_PROBLEMS, FileReader, shutdown_process
+from bzt.utils import RESOURCES_DIR, RequiredTool, CALL_PROBLEMS, FileReader, shutdown_process
 
 
 class K6Executor(ScenarioExecutor, FileLister, WidgetProvider, HavingInstallableTools, SelfDiagnosable):
@@ -30,14 +32,38 @@ class K6Executor(ScenarioExecutor, FileLister, WidgetProvider, HavingInstallable
         self.process = None
         self.k6 = None
         self.kpi_file = None
+        self.scenario = None
 
     def prepare(self):
         super(K6Executor, self).prepare()
+        self.scenario = self.get_scenario()
         self.install_required_tools()
 
         self.script = self.get_script_path()
         if not self.script:
-            raise TaurusConfigError("'script' should be present for k6 executor")
+            if not self.scenario.get('requests'):
+                raise TaurusConfigError("Either 'script' or 'scenario' should be present for Vegeta executor")
+            proto = "grpc" if "procedure" in self.scenario["requests"][0] else "http"
+            self.script = os.path.join(self.engine.artifacts_dir, f"k6_script_{proto}.js")
+            with open(os.path.join(RESOURCES_DIR, "k6", "templates", f"{proto}.txt"), "r") as f:
+                content = f.read()
+            if proto == "http":
+                requests = self.scenario.get_requests()
+                batch_requests = {}
+                i = 0
+                for request in requests:
+                    request_dict = {"method": request.method, "url": request.url}
+                    if request.headers:
+                        request_dict.update({"params": {"headers": request.headers}})
+                    if request.body:
+                        request_dict.update({"body": request.body})
+                    i += 1
+                    batch_requests.update({f"Request {i}": request_dict})
+                with open(self.script, "w") as f:
+                    content = content.replace("REQUESTS", json.dumps(batch_requests, indent=4, sort_keys=True))
+                    f.write(content)
+            else:  # i.e. grpc
+                pass
 
         self.stdout = open(self.engine.create_artifact("k6", ".out"), "w")
         self.stderr = open(self.engine.create_artifact("k6", ".err"), "w")
@@ -48,17 +74,29 @@ class K6Executor(ScenarioExecutor, FileLister, WidgetProvider, HavingInstallable
             self.engine.aggregator.add_underling(self.reader)
 
     def startup(self):
-        cmdline = [self.k6.tool_name, "run", "--out", f"csv={self.kpi_file}"]
+        cmdline = [self.k6.tool_name, "run",
+                   "--out", f"csv={self.kpi_file}",
+                   "--summary-trend-stats", "min,avg,max,p(50),p(90),p(95),p(99),p(99.9),p(100)",
+                   "--summary-export", os.path.join(self.engine.artifacts_dir, "k6-summary.json")]
 
         load = self.get_load()
-        if load.concurrency:
-            cmdline += ['--vus', str(load.concurrency)]
-
-        if load.hold:
-            cmdline += ['--duration', str(int(load.hold)) + "s"]
-
-        if load.iterations:
-            cmdline += ['--iterations', str(load.iterations)]
+        if load.throughput:
+            with open(os.path.join(RESOURCES_DIR, "k6", "templates", f"options.txt"), "r") as f:
+                options = f.read()
+            with open(self.script, "a") as f:
+                f.write(options)
+            cmdline += ['--env', 'arrival_rate=' + str(load.throughput)]
+            cmdline += ['--env', 'initialized_vus=' + str(load.concurrency or 1)]  # 1 vu by default
+            if load.hold:
+                cmdline += ['--env', 'duration=' + str(int(load.hold)) + "s"]
+            # iterations ignored
+        else:
+            if load.concurrency:
+                cmdline += ['--vus', str(load.concurrency)]
+            if load.hold:
+                cmdline += ['--duration', str(int(load.hold)) + "s"]
+            if load.iterations:
+                cmdline += ['--iterations', str(load.iterations)]
 
         cmdline += [self.script]
         self.process = self._execute(cmdline)
@@ -104,12 +142,11 @@ class K6LogReader(ResultsReader):
         self.lines = list(self.file.get_lines(size=1024 * 1024, last_pass=last_pass))
 
         for line in self.lines:
-            if line.startswith("http_reqs"):
+            if line.startswith("http_req_duration") or line.startswith("grpc_req_duration"):
                 self.data['timestamp'].append(int(line.split(',')[1]))
                 self.data['label'].append(line.split(',')[8])
                 self.data['r_code'].append(line.split(',')[12])
                 self.data['error_msg'].append(line.split(',')[4])
-            elif line.startswith("http_req_duration"):
                 self.data['http_req_duration'].append(float(line.split(',')[2]))
             elif line.startswith("http_req_connecting"):
                 self.data['http_req_connecting'].append(float(line.split(',')[2]))
@@ -148,7 +185,7 @@ class K6LogReader(ResultsReader):
 
 class K6(RequiredTool):
     def __init__(self, config=None, **kwargs):
-        super(K6, self).__init__(installable=False, **kwargs)
+        super(K6, self).__init__(installable=False, tool_path="/usr/local/bin/k6", **kwargs)
 
     def check_if_installed(self):
         self.log.debug('Checking K6 Framework: %s' % self.tool_path)
